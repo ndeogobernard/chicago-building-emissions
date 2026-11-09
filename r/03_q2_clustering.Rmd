@@ -1,0 +1,148 @@
+---
+title: "Part 3: Question 2, Energy-Use Profiles of Chicago's Large Buildings"
+subtitle: "Personal project: Decarbonizing Chicago's Large Buildings"
+author: "Name: Bernard Issifu"
+output:
+  html_document:
+    toc: true
+    df_print: kable
+---
+
+**Question 2.** What distinct energy-use profiles exist among Chicago's large buildings?
+
+This document clusters buildings with k-means, using the cleaned data from Part 1 (render
+`01_data_preparation_eda.Rmd` first). The Python version is `python/03_q2_clustering.ipynb`.
+
+```{r setup, message = FALSE}
+# ---- Setup ----
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(cluster)
+
+theme_set(theme_minimal())
+knitr::opts_chunk$set(fig.width = 8, fig.height = 4.5)
+
+bldg <- read.csv("../data/processed/buildings_latest_r.csv", stringsAsFactors = FALSE)
+dim(bldg)
+```
+
+# 1. Approach
+
+As in Python: five standardized features (log site EUI, log GHG intensity, and the electricity, natural
+gas and district-energy shares of site energy); k-means with 25 random starts; *k* chosen from the elbow
+in the within-cluster sum of squares and the average silhouette width for *k* = 2 to 8. The ENERGY STAR
+score is used only to describe the clusters, because it is missing for some buildings.
+
+```{r choose-k}
+features <- c("log_site_eui", "log_ghg_intensity", "elec_share", "gas_share", "district_share")
+X <- scale(bldg[features])
+d <- dist(X)
+
+set.seed(42)
+scores <- do.call(rbind, lapply(2:8, function(k) {
+  km <- kmeans(X, centers = k, nstart = 25, iter.max = 100)
+  data.frame(k = k, within_ss = km$tot.withinss,
+             silhouette = mean(silhouette(km$cluster, d)[, "sil_width"]))
+}))
+
+scores %>%
+  pivot_longer(-k, names_to = "measure") %>%
+  mutate(measure = recode(measure, within_ss = "Within-cluster sum of squares",
+                          silhouette = "Average silhouette width")) %>%
+  ggplot(aes(k, value)) + geom_line() + geom_point() +
+  facet_wrap(~ measure, scales = "free_y") +
+  labs(title = "Choosing the Number of Clusters", x = "Number of clusters k", y = "Value")
+scores %>% mutate(across(-k, ~ round(.x, 3)))
+```
+
+**Interpretation.** The silhouette is highest at k = 2 and 3
+(`r round(scores$silhouette[scores$k == 2], 3)` and `r round(scores$silhouette[scores$k == 3], 3)`) and
+`r round(scores$silhouette[scores$k == 4], 3)` at k = 4, where the elbow bends. As in Python, k = 4 is
+chosen because it separates the district-energy buildings as their own profile.
+
+# 2. The clusters
+
+```{r clusters}
+set.seed(42)
+km <- kmeans(X, centers = 4, nstart = 25, iter.max = 100)
+bldg$cluster <- km$cluster
+
+# Name clusters from their average profile, as in Python
+prof <- bldg %>% group_by(cluster) %>%
+  summarise(site_eui = mean(site_eui), elec_share = mean(elec_share),
+            district_share = mean(district_share))
+names_map <- c()
+left <- prof$cluster
+for (rule in list(c("district_share", "District-energy buildings"),
+                  c("elec_share", "Electric-led, low energy use"),
+                  c("site_eui", "Energy-intensive, poor performers"))) {
+  sub <- prof[prof$cluster %in% left, ]
+  pick <- sub$cluster[which.max(sub[[rule[1]]])]
+  names_map[as.character(pick)] <- rule[2]
+  left <- setdiff(left, pick)
+}
+names_map[as.character(left)] <- "Gas-heated, typical"
+bldg$profile <- unname(names_map[as.character(bldg$cluster)])
+
+profile <- bldg %>% group_by(profile) %>%
+  summarise(buildings = n(), median_site_eui = median(site_eui), median_ghg = median(ghg_intensity),
+            elec_share = mean(elec_share), gas_share = mean(gas_share),
+            district_share = mean(district_share),
+            median_energy_star = median(energy_star, na.rm = TRUE),
+            median_age = median(building_age), total_ghg_kt = sum(ghg_total) / 1000) %>%
+  mutate(share_of_total_ghg = total_ghg_kt / sum(total_ghg_kt)) %>%
+  arrange(median_ghg)
+profile %>% mutate(across(where(is.numeric), ~ round(.x, 2)))
+```
+
+```{r pca, fig.height = 5.5}
+pcs <- prcomp(X)
+ggplot(data.frame(PC1 = pcs$x[, 1], PC2 = pcs$x[, 2], profile = bldg$profile),
+       aes(PC1, PC2, colour = profile)) +
+  geom_point(size = 0.8, alpha = 0.6) +
+  labs(title = "k-means Clusters (k = 4) on the First Two Principal Components",
+       x = "First principal component", y = "Second principal component", colour = "Profile")
+```
+
+```{r composition, fig.width = 10}
+comp <- bldg %>% count(profile, property_group) %>% group_by(profile) %>%
+  mutate(pct = 100 * n / sum(n))
+profile_order <- profile$profile
+ggplot(comp, aes(property_group, factor(profile, levels = profile_order), fill = pct)) +
+  geom_tile() + geom_text(aes(label = round(pct))) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Property-Group Composition of Each Cluster (% of buildings in the cluster)",
+       x = "Property group", y = "Energy profile", fill = "% of cluster") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r save}
+write.csv(profile, "../report/figures/q2_cluster_profiles_r.csv", row.names = FALSE)
+```
+
+# 3. Discussion
+
+```{r get-values, include = FALSE}
+p <- function(name, col) profile[[col]][profile$profile == name]
+```
+
+R finds the same four profiles as Python:
+
+- **Gas-heated, typical** (`r p("Gas-heated, typical", "buildings")` buildings): mostly gas
+  (`r round(100 * p("Gas-heated, typical", "gas_share"))`%), lowest GHG intensity
+  (`r p("Gas-heated, typical", "median_ghg")` kg/sq ft).
+- **Electric-led, low energy use** (`r p("Electric-led, low energy use", "buildings")`): lowest energy use
+  but higher GHG intensity (`r p("Electric-led, low energy use", "median_ghg")`) than the gas-heated
+  group, because grid electricity carries more CO2 per unit.
+- **Energy-intensive, poor performers** (`r p("Energy-intensive, poor performers", "buildings")`): median
+  ENERGY STAR score `r p("Energy-intensive, poor performers", "median_energy_star")`, producing
+  `r round(100 * p("Energy-intensive, poor performers", "share_of_total_ghg"))`% of total emissions.
+- **District-energy buildings** (`r p("District-energy buildings", "buildings")`): mostly district steam
+  and chilled water, the highest GHG intensity
+  (`r p("District-energy buildings", "median_ghg")`).
+
+Cluster sizes can differ by a few buildings from Python because k-means' random starts differ between the
+two languages, but the profiles and their decarbonization implications are the same: retrofit the
+energy-intensive group first, electrify the gas-heated group, and rely on grid and district-plant
+decarbonization for the other two.

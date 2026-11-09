@@ -1,0 +1,5 @@
+model,CV R² (mean ± sd),Test R²,Test RMSE (log),Test MAE (kg CO2e/sq ft),Median abs. error (kg/sq ft)
+Property group only,0.245 ± 0.028,0.276,0.418,2.256,1.394
+Linear regression,0.245 ± 0.034,0.287,0.415,2.245,1.285
+Regression tree,0.200 ± 0.019,0.223,0.433,2.38,1.398
+Random forest,0.258 ± 0.031,0.312,0.408,2.246,1.38

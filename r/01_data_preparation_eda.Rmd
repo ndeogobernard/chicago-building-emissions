@@ -1,0 +1,258 @@
+---
+title: "Part 1: Data Preparation and Exploratory Analysis"
+subtitle: "Personal project: Decarbonizing Chicago's Large Buildings"
+author: "Name: Bernard Issifu"
+output:
+  html_document:
+    toc: true
+    df_print: kable
+---
+
+```{r setup, message = FALSE}
+# ---- Setup ----
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+theme_set(theme_minimal())
+knitr::opts_chunk$set(fig.width = 9, fig.height = 4.5)
+```
+
+This document introduces the Chicago Energy Benchmarking dataset, cleans it, engineers the features used
+in Parts 2 and 3, and explores how greenhouse gas (GHG) intensity varies across buildings and over time.
+The same steps are implemented in Python in `python/01_data_preparation_eda.ipynb`.
+
+# 1. The dataset
+
+Chicago's Energy Benchmarking Ordinance requires buildings of 50,000 sq ft or more to report their annual
+energy use. The **Chicago Energy Benchmarking** dataset (City of Chicago Data Portal) holds those reports
+for 2014–2023: one row per building per year, with property type, floor area, year built, number of
+buildings, community area and location; electricity, natural gas, district steam, district chilled water
+and other fuel use; site and source energy use intensity (EUI); ENERGY STAR score; Chicago Energy Rating;
+and total and per-sq-ft GHG emissions.
+
+```{r load}
+raw <- read.csv("../data/chicago_energy_benchmarking.csv", stringsAsFactors = FALSE,
+                check.names = FALSE)
+dim(raw)
+cat("Distinct buildings:", format(n_distinct(raw$ID), big.mark = ","), "\n")
+table(raw$`Data Year`)
+sort(table(raw$`Reporting Status`), decreasing = TRUE)
+```
+
+# 2. Data quality
+
+```{r missing, fig.height = 6}
+missing <- data.frame(column = names(raw),
+                      pct_missing = round(colMeans(is.na(raw) | raw == "") * 100, 1)) %>%
+  filter(pct_missing > 0) %>%
+  arrange(desc(pct_missing))
+
+ggplot(missing, aes(x = reorder(column, pct_missing), y = pct_missing)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Percentage of Missing Values by Column", x = "Column", y = "Missing (%)")
+missing
+```
+
+**Interpretation.** Fuel-specific columns are mostly empty because few buildings use district steam,
+chilled water or other fuels; a missing fuel almost always means the building does not use it. GHG
+intensity and site EUI are missing for about a fifth of rows, mainly reports marked "Not Submitted" or
+"Exempt". (Empty text fields are counted as missing here, so a few text columns show slightly higher
+percentages than in the Python version.)
+
+# 3. Cleaning
+
+```{r cleaning}
+df <- raw %>%
+  rename(year = `Data Year`, property_type = `Primary Property Type`,
+         floor_area = `Gross Floor Area - Buildings (sq ft)`, year_built = `Year Built`,
+         n_buildings = `# of Buildings`, energy_star = `ENERGY STAR Score`,
+         elec_kbtu = `Electricity Use (kBtu)`, gas_kbtu = `Natural Gas Use (kBtu)`,
+         steam_kbtu = `District Steam Use (kBtu)`, chilled_kbtu = `District Chilled Water Use (kBtu)`,
+         other_kbtu = `All Other Fuel Use (kBtu)`, site_eui = `Site EUI (kBtu/sq ft)`,
+         ghg_intensity = `GHG Intensity (kg CO2e/sq ft)`,
+         ghg_total = `Total GHG Emissions (Metric Tons CO2e)`,
+         community_area = `Community Area`, lat = Latitude, lon = Longitude)
+steps <- data.frame(step = "Raw building-years", rows = nrow(df))
+
+# (1) Keep reports that contain the outcome and the energy intensity
+df <- df %>% filter(!is.na(ghg_intensity), !is.na(site_eui))
+steps <- rbind(steps, data.frame(step = "Has GHG intensity and site EUI", rows = nrow(df)))
+
+# (2) Remove physically implausible values (data-entry errors)
+df <- df %>% filter(between(site_eui, 5, 1000), between(ghg_intensity, 0.5, 150))
+steps <- rbind(steps, data.frame(step = "Plausible EUI and GHG intensity", rows = nrow(df)))
+
+# (3) Building characteristics needed for the models
+df <- df %>% filter(!is.na(floor_area), !is.na(year_built), !is.na(lat), !is.na(lon),
+                    floor_area > 0, between(year_built, 1850, 2023))
+steps <- rbind(steps, data.frame(step = "Has floor area, year built and location", rows = nrow(df)))
+
+# (4) One report per building per year
+df <- df %>% arrange(ID, year) %>% group_by(ID, year) %>% slice_tail(n = 1) %>% ungroup()
+steps <- rbind(steps, data.frame(step = "One row per building-year", rows = nrow(df)))
+steps
+```
+
+# 4. Feature engineering
+
+```{r features}
+# (a) Property types grouped into 10 categories with similar energy use
+group_map <- c(
+  "Multifamily Housing" = "Multifamily", "Residential" = "Multifamily",
+  "Residence Hall/Dormitory" = "Multifamily", "K-12 School" = "K-12 school",
+  "Office" = "Office", "Financial Office" = "Office",
+  "College/University" = "Higher education", "Adult Education" = "Higher education",
+  "Hotel" = "Hotel",
+  "Retail Store" = "Retail", "Strip Mall" = "Retail", "Enclosed Mall" = "Retail",
+  "Other - Mall" = "Retail", "Wholesale Club/Supercenter" = "Retail",
+  "Automobile Dealership" = "Retail", "Commercial" = "Retail",
+  "Supermarket/Grocery Store" = "Grocery",
+  "Hospital (General Medical & Surgical)" = "Healthcare", "Other - Specialty Hospital" = "Healthcare",
+  "Medical Office" = "Healthcare",
+  "Senior Care Community" = "Senior living", "Senior Living Community" = "Senior living",
+  "Residential Care Facility" = "Senior living")
+df$property_group <- unname(group_map[df$property_type])
+df$property_group[is.na(df$property_group)] <- "Other"
+
+# (b) Size, age and number of buildings
+df$log_floor_area <- log10(df$floor_area)
+df$building_age <- df$year - df$year_built
+df$n_buildings <- pmax(ifelse(is.na(df$n_buildings), 1, df$n_buildings), 1)
+
+# (c) Distance to downtown (the Loop) in km
+df$dist_downtown_km <- sqrt(((df$lat - 41.8781) * 111)^2 +
+                            ((df$lon + 87.6298) * 111 * cos(41.88 * pi / 180))^2)
+
+# (d) Energy mix: shares of total site energy (a missing fuel means none was reported)
+fuel <- function(x) ifelse(is.na(x), 0, x)
+total <- fuel(df$elec_kbtu) + fuel(df$gas_kbtu) + fuel(df$steam_kbtu) + fuel(df$chilled_kbtu) +
+  fuel(df$other_kbtu)
+df$elec_share <- fuel(df$elec_kbtu) / total
+df$gas_share <- fuel(df$gas_kbtu) / total
+df$district_share <- (fuel(df$steam_kbtu) + fuel(df$chilled_kbtu)) / total
+df$has_energy_mix <- total > 0
+
+# (e) Log versions of the skewed intensities
+df$log_ghg_intensity <- log(df$ghg_intensity)
+df$log_site_eui <- log(df$site_eui)
+
+# Latest report per building, used for modelling
+latest <- df %>% arrange(year) %>% group_by(ID) %>% slice_tail(n = 1) %>% ungroup()
+cat("Clean building-years:", nrow(df), "  Buildings (latest year):", nrow(latest), "\n")
+sort(table(df$property_group), decreasing = TRUE)
+```
+
+**Interpretation.** Cleaning keeps **`r format(nrow(df), big.mark = ",")` building-years** and
+**`r format(nrow(latest), big.mark = ",")` buildings** (latest year each), the same counts as the Python
+version. `r round(mean(latest$year == 2023) * 100)`% of the latest reports are from 2023.
+
+# 5. Exploratory analysis
+
+## 5.1 GHG intensity by property type
+
+```{r by-type}
+ggplot(latest, aes(x = reorder(property_group, ghg_intensity, median), y = ghg_intensity)) +
+  geom_boxplot(fill = "lightblue", outlier.shape = NA) +
+  coord_flip(ylim = c(0, 35)) +
+  labs(title = "GHG Intensity by Property Group (latest year, outliers hidden)",
+       x = "Property group", y = "GHG intensity (kg CO2e per sq ft)")
+
+by_type <- latest %>% group_by(property_group) %>%
+  summarise(buildings = n(), median_ghg = median(ghg_intensity), median_eui = median(site_eui),
+            total_ghg_kt = sum(ghg_total) / 1000) %>%
+  arrange(median_ghg)
+by_type %>% mutate(across(where(is.numeric), ~ round(.x, 1)))
+```
+
+**Interpretation.** Grocery stores (median
+`r round(by_type$median_ghg[by_type$property_group == "Grocery"], 1)` kg CO2e/sq ft) and healthcare
+buildings (`r round(by_type$median_ghg[by_type$property_group == "Healthcare"], 1)`) emit three to four
+times as much per sq ft as multifamily housing
+(`r round(by_type$median_ghg[by_type$property_group == "Multifamily"], 1)`), but multifamily buildings
+produce the most emissions in total because there are so many of them.
+
+## 5.2 Age, size and location
+
+```{r age-size}
+latest %>%
+  summarise(age = cor(ghg_intensity, building_age, method = "spearman"),
+            log_floor_area = cor(ghg_intensity, log_floor_area, method = "spearman"),
+            dist_downtown = cor(ghg_intensity, dist_downtown_km, method = "spearman"),
+            n_buildings = cor(ghg_intensity, n_buildings, method = "spearman")) %>%
+  round(3)
+
+latest %>%
+  mutate(age_band = cut(building_age, c(0, 25, 50, 75, 100, 200), right = FALSE,
+                        labels = c("<25", "25-49", "50-74", "75-99", "100+"))) %>%
+  group_by(age_band) %>% summarise(median_ghg = median(ghg_intensity)) %>%
+  ggplot(aes(age_band, median_ghg)) + geom_col(fill = "steelblue") +
+  labs(title = "Median GHG Intensity by Building Age", x = "Building age (years)",
+       y = "Median GHG intensity (kg CO2e/sq ft)")
+```
+
+**Interpretation.** As in Python, age, size and distance to downtown have Spearman correlations close to
+zero with GHG intensity; property type is the main divider.
+
+## 5.3 Energy mix by property type
+
+```{r mix}
+mix <- latest %>% group_by(property_group) %>%
+  summarise(Electricity = mean(elec_share), `Natural gas` = mean(gas_share),
+            `District steam/chilled water` = mean(district_share)) %>%
+  arrange(`Natural gas`)
+mix %>%
+  pivot_longer(-property_group, names_to = "source", values_to = "share") %>%
+  ggplot(aes(x = factor(property_group, levels = mix$property_group), y = share, fill = source)) +
+  geom_col() + coord_flip() +
+  scale_fill_manual(values = c("Electricity" = "gold", "Natural gas" = "firebrick",
+                               "District steam/chilled water" = "slateblue")) +
+  labs(title = "Average Energy Mix by Property Group (latest year)", x = "Property group",
+       y = "Share of site energy", fill = NULL)
+mix %>% mutate(across(where(is.numeric), ~ round(.x, 3)))
+```
+
+## 5.4 GHG intensity trend, 2018–2023
+
+```{r trend}
+trend <- df %>% filter(between(year, 2018, 2023))
+panel_ids <- trend %>% group_by(ID) %>% summarise(n = n_distinct(year)) %>% filter(n == 6) %>% pull(ID)
+trend_tab <- trend %>% group_by(year) %>%
+  summarise(median_all = median(ghg_intensity), reports = n(),
+            median_balanced_panel = median(ghg_intensity[ID %in% panel_ids]))
+
+trend_tab %>%
+  pivot_longer(c(median_all, median_balanced_panel), names_to = "series", values_to = "median") %>%
+  ggplot(aes(year, median, colour = series)) + geom_line() + geom_point() +
+  scale_colour_discrete(labels = c("All reporting buildings",
+                                   paste("Same", length(panel_ids), "buildings every year"))) +
+  labs(title = "Median GHG Intensity of Chicago's Large Buildings, 2018-2023", x = "Data year",
+       y = "Median GHG intensity (kg CO2e/sq ft)", colour = NULL)
+trend_tab
+change <- trend_tab$median_balanced_panel[trend_tab$year == 2023] /
+  trend_tab$median_balanced_panel[trend_tab$year == 2018] - 1
+```
+
+**Interpretation.** For the `r length(panel_ids)` buildings that reported in every year from 2018 to
+2023, median GHG intensity changed by `r round(change * 100, 1)`%, matching the Python result. Part of
+this decline likely reflects a cleaner electricity grid and the 2020 pandemic, not only building
+upgrades.
+
+```{r save}
+keep <- c("ID", "year", "property_type", "property_group", "floor_area", "log_floor_area",
+          "year_built", "building_age", "n_buildings", "community_area", "lat", "lon",
+          "dist_downtown_km", "site_eui", "log_site_eui", "ghg_intensity", "log_ghg_intensity",
+          "ghg_total", "energy_star", "elec_share", "gas_share", "district_share", "has_energy_mix")
+dir.create("../data/processed", showWarnings = FALSE)
+write.csv(df[keep], "../data/processed/building_years_clean_r.csv", row.names = FALSE)
+write.csv(latest[keep], "../data/processed/buildings_latest_r.csv", row.names = FALSE)
+cat("Saved", nrow(df), "building-years and", nrow(latest), "buildings\n")
+```
+
+# 6. Summary
+
+The cleaned data and every summary above match the Python version. The two project questions are:
+
+1. **Which building characteristics best predict a building's GHG intensity?** (regression)
+2. **What distinct energy-use profiles exist among Chicago's large buildings?** (k-means clustering)

@@ -1,0 +1,168 @@
+---
+title: "Part 2: Question 1, Predicting GHG Intensity from Building Characteristics"
+subtitle: "Personal project: Decarbonizing Chicago's Large Buildings"
+author: "Name: Bernard Issifu"
+output:
+  html_document:
+    toc: true
+    df_print: kable
+---
+
+**Question 1.** Which building characteristics best predict a building's GHG intensity?
+
+This document uses the cleaned data from Part 1 (render `01_data_preparation_eda.Rmd` first). The Python
+version is `python/02_q1_regression.ipynb`.
+
+```{r setup, message = FALSE}
+# ---- Setup ----
+library(dplyr)
+library(ggplot2)
+library(rpart)
+library(randomForest)
+
+theme_set(theme_minimal())
+knitr::opts_chunk$set(fig.width = 8, fig.height = 4.5)
+
+bldg <- read.csv("../data/processed/buildings_latest_r.csv", stringsAsFactors = FALSE)
+bldg$log_n_buildings <- log(bldg$n_buildings)
+dim(bldg)
+```
+
+# 1. Approach
+
+The approach mirrors the Python version: one row per building (latest report); target
+`log(GHG intensity)`; features available without energy bills (property group, log10 floor area,
+building age, log number of buildings, distance to downtown, latitude, data year); numeric features
+standardized with training-set means and standard deviations; models compared against a
+property-group-only baseline:
+
+- linear regression (property group as a factor; its first level, Grocery, is the reference);
+- a regression tree (maximum depth 5, at least 30 buildings per leaf);
+- a random forest (400 trees, at least 5 buildings per leaf, 4 of the 7 features tried at each split).
+
+The data are split 80/20 within each property group, and 5-fold cross-validation is run on the training
+set.
+
+```{r split}
+num_cols <- c("log_floor_area", "building_age", "log_n_buildings", "dist_downtown_km", "lat", "year")
+data <- bldg[, c(num_cols, "property_group", "log_ghg_intensity")]
+data$property_group <- factor(data$property_group)
+
+# Stratified 80/20 split by property group
+set.seed(42)
+idx_train <- unlist(lapply(split(seq_len(nrow(data)), data$property_group),
+                           function(i) sample(i, round(0.8 * length(i)))))
+train <- data[idx_train, ]
+test <- data[-idx_train, ]
+
+# Standardize numeric features with training-set statistics
+mu <- sapply(train[num_cols], mean)
+sdv <- sapply(train[num_cols], sd)
+train[num_cols] <- sweep(sweep(train[num_cols], 2, mu), 2, sdv, "/")
+test[num_cols] <- sweep(sweep(test[num_cols], 2, mu), 2, sdv, "/")
+cat("Training:", nrow(train), "buildings   Test:", nrow(test), "buildings\n")
+```
+
+# 2. Training and evaluation
+
+```{r models}
+fit_model <- function(name, tr) {
+  switch(name,
+    "Property group only" = lm(log_ghg_intensity ~ property_group, data = tr),
+    "Linear regression" = lm(log_ghg_intensity ~ ., data = tr),
+    "Regression tree" = rpart(log_ghg_intensity ~ ., data = tr, method = "anova",
+                              control = rpart.control(maxdepth = 5, minbucket = 30, cp = 0)),
+    "Random forest" = randomForest(log_ghg_intensity ~ ., data = tr, ntree = 400, nodesize = 5,
+                                   mtry = 4))
+}
+r2 <- function(y, p) 1 - sum((y - p)^2) / sum((y - mean(y))^2)
+model_names <- c("Property group only", "Linear regression", "Regression tree", "Random forest")
+
+# 5-fold cross-validated R-squared on the training set
+set.seed(42)
+folds <- sample(rep(1:5, length.out = nrow(train)))
+cv_r2 <- sapply(model_names, function(m) sapply(1:5, function(k) {
+  fit <- fit_model(m, train[folds != k, ])
+  r2(train$log_ghg_intensity[folds == k], predict(fit, train[folds == k, ]))
+}))
+
+set.seed(42)
+fits <- lapply(setNames(model_names, model_names), fit_model, tr = train)
+preds <- lapply(fits, predict, newdata = test)
+y <- test$log_ghg_intensity
+
+results <- do.call(rbind, lapply(model_names, function(m) {
+  p <- preds[[m]]
+  data.frame(model = m,
+             cv_r2 = sprintf("%.3f +/- %.3f", mean(cv_r2[, m]), sd(cv_r2[, m])),
+             test_r2 = round(r2(y, p), 3),
+             test_rmse_log = round(sqrt(mean((y - p)^2)), 3),
+             test_mae_kg = round(mean(abs(exp(y) - exp(p))), 3),
+             median_abs_error_kg = round(median(abs(exp(y) - exp(p))), 3))
+}))
+results
+```
+
+```{r pred-actual, fig.width = 6, fig.height = 5}
+ggplot(data.frame(actual = exp(y), predicted = exp(preds[["Random forest"]])),
+       aes(actual, predicted)) +
+  geom_point(alpha = 0.5, colour = "steelblue", size = 1) +
+  geom_abline(linetype = "dashed") +
+  scale_x_log10() + scale_y_log10() +
+  labs(title = "Random Forest: Predicted vs Actual (test set)",
+       x = "Actual GHG intensity (kg CO2e/sq ft, log scale)",
+       y = "Predicted GHG intensity (kg CO2e/sq ft, log scale)")
+```
+
+**Interpretation.** The random forest explains `r results$test_r2[4]` of the variance in log GHG
+intensity on the test set and linear regression `r results$test_r2[2]`, while property group alone
+explains `r results$test_r2[1]`; the regression tree reaches `r results$test_r2[3]`. As in Python,
+building characteristics predict GHG intensity only weakly, and nearly all of what they do predict comes
+from property type.
+
+# 3. Which characteristics matter?
+
+```{r permutation}
+# Drop in test R-squared when one feature is shuffled (10 repeats)
+rf <- fits[["Random forest"]]
+base <- r2(y, preds[["Random forest"]])
+features <- c(num_cols, "property_group")
+set.seed(42)
+drops <- sapply(features, function(f) mean(replicate(10, {
+  shuffled <- test
+  shuffled[[f]] <- sample(shuffled[[f]])
+  base - r2(y, predict(rf, shuffled))
+})))
+imp <- data.frame(feature = features, mean_r2_drop = round(drops, 4)) %>% arrange(desc(mean_r2_drop))
+
+ggplot(imp, aes(x = reorder(feature, mean_r2_drop), y = mean_r2_drop)) +
+  geom_col(fill = "seagreen") + coord_flip() +
+  labs(title = "Random Forest: Permutation Importance (test set)", x = "Feature",
+       y = "Drop in test R-squared when the feature is shuffled")
+imp
+```
+
+```{r coefficients}
+coefs <- coef(fits[["Linear regression"]])[-1]
+data.frame(term = names(coefs), coefficient = round(coefs, 3),
+           pct_change_in_ghg = round((exp(coefs) - 1) * 100, 1), row.names = NULL) %>%
+  arrange(desc(abs(coefficient)))
+```
+
+```{r save}
+write.csv(results, "../report/figures/q1_results_r.csv", row.names = FALSE)
+write.csv(imp, "../report/figures/q1_permutation_importance_r.csv", row.names = FALSE)
+```
+
+# 4. Discussion
+
+The R models agree with the Python ones. **Property group** is by far the most important feature
+(shuffling it lowers the forest's R-squared by `r imp$mean_r2_drop[imp$feature == "property_group"]`),
+followed by **building age** (`r imp$mean_r2_drop[imp$feature == "building_age"]`); floor area, location
+and year matter little. In the linear model, multifamily buildings emit
+`r round((1 - exp(coefs["property_groupMultifamily"])) * 100)`% less per sq ft than grocery stores.
+
+The exact numbers differ slightly from Python because the train/test split is drawn by R's random number
+generator and the forest implementations differ. The conclusion is the same: a building's type sets the
+expected range of its emissions, but where it falls in that range depends on equipment and operation,
+which these characteristics do not capture.

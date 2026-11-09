@@ -1,0 +1,8 @@
+"feature","mean_r2_drop"
+"property_group",0.6112
+"building_age",0.0588
+"year",0.045
+"lat",0.0358
+"log_floor_area",0.0232
+"dist_downtown_km",0.0211
+"log_n_buildings",5e-04
