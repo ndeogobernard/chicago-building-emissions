@@ -1,5 +1,7 @@
 # Decarbonizing Chicago's Large Buildings
 
+![Project overview](assets/social-preview.png)
+
 A data science project on building decarbonization: which of Chicago's large buildings emit the most
 greenhouse gas (GHG) per square foot, and what distinct energy-use profiles exist among them. It combines
 regression models with k-means clustering on the City of Chicago's energy benchmarking data
