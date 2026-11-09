@@ -1,9 +1,9 @@
 # Decarbonizing Chicago's Large Buildings
 
-A personal data-mining project (climate tech) by **Bernard Issifu**: an analysis of building energy
-use and greenhouse gas (GHG) emissions in Chicago, structured like a university data-mining final
-project: a dataset introduction, then two questions, each with an introduction, approach, results and
-discussion. Every analysis is written in both **Python** and **R**.
+A data science project on building decarbonization: which of Chicago's large buildings emit the most
+greenhouse gas (GHG) per square foot, and what distinct energy-use profiles exist among them. It combines
+regression models with k-means clustering on the City of Chicago's energy benchmarking data
+(2014–2023). Every analysis is implemented in both **Python** and **R**.
 
 ## Dataset
 

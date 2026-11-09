@@ -1,6 +1,6 @@
 ---
 title: "Decarbonizing Chicago's Large Buildings"
-subtitle: "Personal data-mining project (climate tech) · Chicago Energy Benchmarking data, 2014–2023"
+subtitle: "Data science project (climate tech) · Chicago Energy Benchmarking data, 2014–2023"
 author: "Bernard Issifu"
 date: "November 2026"
 ---

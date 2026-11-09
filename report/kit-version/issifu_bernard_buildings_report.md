@@ -2,7 +2,6 @@
 title: "Decarbonizing Chicago's Large Buildings"
 author: "Bernard Issifu"
 date: "9 November 2026"
-course: "Personal data-mining project (climate tech)"
 no-section-numbers: true
 ---
 

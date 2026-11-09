@@ -1,6 +1,6 @@
 ---
 title: "Part 3: Question 2, Energy-Use Profiles of Chicago's Large Buildings"
-subtitle: "Personal project: Decarbonizing Chicago's Large Buildings"
+subtitle: "Data science project: Decarbonizing Chicago's Large Buildings"
 author: "Name: Bernard Issifu"
 output:
   html_document:

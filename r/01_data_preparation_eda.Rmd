@@ -1,6 +1,6 @@
 ---
 title: "Part 1: Data Preparation and Exploratory Analysis"
-subtitle: "Personal project: Decarbonizing Chicago's Large Buildings"
+subtitle: "Data science project: Decarbonizing Chicago's Large Buildings"
 author: "Name: Bernard Issifu"
 output:
   html_document:

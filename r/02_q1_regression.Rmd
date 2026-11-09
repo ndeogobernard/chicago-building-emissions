@@ -1,6 +1,6 @@
 ---
 title: "Part 2: Question 1, Predicting GHG Intensity from Building Characteristics"
-subtitle: "Personal project: Decarbonizing Chicago's Large Buildings"
+subtitle: "Data science project: Decarbonizing Chicago's Large Buildings"
 author: "Name: Bernard Issifu"
 output:
   html_document:
